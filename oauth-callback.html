@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OAuth Callback</title>
+</head>
+<body>
+  <p>Completing sign-in…</p>
+
+  <script src="https://js.arcgis.com/4.29/"></script>
+  <script>
+    require(["esri/identity/IdentityManager"], function (esriId) {
+      // This handles the OAuth redirect and stores the credential,
+      // then returns you to where you came from.
+      esriId
+        .checkSignInStatus("https://spectrofly.maps.arcgis.com/sharing")
+        .finally(function () {
+          // go back to the app root after processing
+          window.location.replace("./");
+        });
+    });
+  </script>
+</body>
+</html>
