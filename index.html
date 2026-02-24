@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>SORA Buffer App</title>
+
+  <link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css" />
+  <script src="https://js.arcgis.com/4.29/"></script>
+
+  <style>
+    html, body, #viewDiv { height: 100%; width: 100%; margin: 0; padding: 0; }
+    .panel {
+      width: 320px;
+      padding: 12px 12px 10px 12px;
+      background: white;
+      box-shadow: 0 2px 18px rgba(0,0,0,0.18);
+      border-radius: 10px;
+      font-family: Arial, sans-serif;
+    }
+    .panel h3 { margin: 0 0 8px 0; font-size: 16px; }
+    .row { margin: 8px 0; }
+    label { display:block; font-size: 12px; opacity: 0.8; margin-bottom: 4px; }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+    button {
+      width: 100%;
+      margin-top: 8px;
+      padding: 10px;
+      border: 0;
+      border-radius: 10px;
+      background: #2b6cb0;
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.secondary { background: #4a5568; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 8px; font-size: 12px; }
+    .hint { font-size: 12px; opacity: 0.8; line-height: 1.35; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #edf2f7;
+      border-radius: 999px;
+      font-size: 12px;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="viewDiv"></div>
+
+  <script>
+    require([
+      "esri/config",
+      "esri/identity/OAuthInfo",
+      "esri/identity/IdentityManager",
+      "esri/WebMap",
+      "esri/views/MapView",
+      "esri/layers/GraphicsLayer",
+      "esri/widgets/Sketch",
+      "esri/geometry/geometryEngine",
+      "esri/Graphic",
+      "esri/layers/FeatureLayer",
+      "esri/widgets/Expand"
+    ], function (
+      esriConfig, OAuthInfo, esriId,
+      WebMap, MapView, GraphicsLayer, Sketch, geometryEngine, Graphic, FeatureLayer, Expand
+    ) {
+
+      // ✅ Use your org portal
+      esriConfig.portalUrl = "https://spectrofly.maps.arcgis.com";
+
+      // ✅ Register OAuth app (this is the missing piece)
+      const oauthInfo = new OAuthInfo({
+        appId: "dEWDiOZ4uOvQiDCl",
+        portalUrl: "https://spectrofly.maps.arcgis.com",
+        popup: true   // popup is usually best; if your browser blocks popups, set to false
+      });
+      esriId.registerOAuthInfos([oauthInfo]);
+
+      const PORTAL_SHARING_URL = "https://spectrofly.maps.arcgis.com/sharing";
+
+      // --- Web map ---
+      const WEBMAP_ID = "545efda8fc7e44aaae8d5a7ea967e3b3";
+
+      // --- Hosted feature layer (layer 0) ---
+      const SORA_LAYER_URL = "https://services6.arcgis.com/QViMmJXsTawLQWTG/arcgis/rest/services/SORA_buffers_2/FeatureServer/0";
+
+      const webmap = new WebMap({ portalItem: { id: WEBMAP_ID } });
+
+      const view = new MapView({
+        container: "viewDiv",
+        map: webmap
+      });
+
+      const drawLayer = new GraphicsLayer({ title: "SORA Draw" });
+      webmap.add(drawLayer);
+
+      const aoiSymbol = {
+        type: "simple-fill",
+        color: [0, 0, 0, 0.05],
+        outline: { color: [0, 0, 0, 0.8], width: 2 }
+      };
+
+      const bufferSymbol = {
+        type: "simple-fill",
+        color: [0, 100, 255, 0.12],
+        outline: { color: [0, 100, 255, 0.9], width: 2 }
+      };
+
+      let lastAOIGeometry = null;
+      let lastBufferGeometry = null;
+
+      const panel = document.createElement("div");
+      panel.className = "panel";
+      panel.innerHTML = `
+        <h3>SORA buffer tool</h3>
+        <div class="hint">
+          1) Draw AOI polygon<br/>
+          2) Set buffer distance (meters)<br/>
+          3) Generate buffer → Save to hosted layer
+        </div>
+        <div class="pill">Geodesic buffer (meters)</div>
+
+        <div class="row">
+          <label>Operation ID (optional)</label>
+          <input id="opId" placeholder="e.g., SORA-2026-001" />
+        </div>
+
+        <div class="row">
+          <label>Buffer distance (m)</label>
+          <input id="bufM" type="number" value="150" min="0" step="1" />
+        </div>
+
+        <div class="row">
+          <label>Notes (optional)</label>
+          <textarea id="notes" placeholder="Free text..."></textarea>
+        </div>
+
+        <button id="btnDraw">Draw AOI polygon</button>
+        <button id="btnBuffer" class="secondary" disabled>Generate buffer</button>
+        <button id="btnSave" disabled>Sign in & Save buffer</button>
+
+        <button id="btnClear" class="secondary">Clear</button>
+        <div class="status" id="status"></div>
+        <div class="hint" style="margin-top:8px;">
+          Export: open the hosted layer item → <b>Export data</b> → SHP / KML(KMZ) / GeoJSON, etc.
+        </div>
+      `;
+
+      const expand = new Expand({ view, content: panel, expanded: true });
+      view.ui.add(expand, "top-right");
+
+      const statusEl = panel.querySelector("#status");
+      const btnDraw = panel.querySelector("#btnDraw");
+      const btnBuffer = panel.querySelector("#btnBuffer");
+      const btnSave = panel.querySelector("#btnSave");
+      const btnClear = panel.querySelector("#btnClear");
+
+      function setStatus(msg, isError=false) {
+        statusEl.style.color = isError ? "#c53030" : "#2d3748";
+        statusEl.textContent = msg || "";
+      }
+
+      const sketch = new Sketch({
+        view,
+        layer: drawLayer,
+        creationMode: "single",
+        availableCreateTools: ["polygon"],
+        visibleElements: {
+          selectionTools: { "lasso-selection": false, "rectangle-selection": false },
+          settingsMenu: false,
+          undoRedoMenu: true
+        }
+      });
+
+      sketch.visible = false;
+      view.ui.add(sketch, "top-left");
+
+      function clearAll() {
+        drawLayer.removeAll();
+        lastAOIGeometry = null;
+        lastBufferGeometry = null;
+        btnBuffer.disabled = true;
+        btnSave.disabled = true;
+        setStatus("Cleared.");
+      }
+
+      btnClear.addEventListener("click", clearAll);
+
+      btnDraw.addEventListener("click", () => {
+        setStatus("Drawing mode: click to start polygon, double-click to finish.");
+        sketch.visible = true;
+        drawLayer.removeAll();
+        lastAOIGeometry = null;
+        lastBufferGeometry = null;
+        btnBuffer.disabled = true;
+        btnSave.disabled = true;
+
+        sketch.create("polygon");
+      });
+
+      sketch.on("create", (evt) => {
+        if (evt.state === "complete") {
+          const g = evt.graphic;
+          g.symbol = aoiSymbol;
+          g.attributes = { type: "aoi" };
+          lastAOIGeometry = g.geometry;
+          btnBuffer.disabled = false;
+          setStatus("AOI created. Set buffer distance and click “Generate buffer”.");
+          sketch.visible = false;
+        }
+      });
+
+      btnBuffer.addEventListener("click", () => {
+        if (!lastAOIGeometry) {
+          setStatus("No AOI found. Click “Draw AOI polygon” first.", true);
+          return;
+        }
+
+        const meters = Number(panel.querySelector("#bufM").value);
+        if (!Number.isFinite(meters) || meters < 0) {
+          setStatus("Buffer distance must be a number ≥ 0.", true);
+          return;
+        }
+
+        const aoiGraphics = drawLayer.graphics.filter(gr => gr.attributes && gr.attributes.type === "aoi");
+        drawLayer.removeAll();
+        if (aoiGraphics.length) drawLayer.addMany(aoiGraphics);
+
+        const bufferGeom = geometryEngine.geodesicBuffer(lastAOIGeometry, meters, "meters");
+        if (!bufferGeom) {
+          setStatus("Buffer failed (geometry engine returned null). Try a simpler polygon.", true);
+          return;
+        }
+
+        lastBufferGeometry = bufferGeom;
+
+        drawLayer.add(new Graphic({
+          geometry: bufferGeom,
+          symbol: bufferSymbol,
+          attributes: { type: "buffer", buffer_m: meters }
+        }));
+
+        btnSave.disabled = false;
+        setStatus(`Buffer generated: ${meters} m. Click “Sign in & Save buffer”.`);
+      });
+
+      async function ensureSignedIn() {
+        try {
+          await esriId.checkSignInStatus(PORTAL_SHARING_URL);
+          return true;
+        } catch (e) {
+          await esriId.getCredential(PORTAL_SHARING_URL);
+          return true;
+        }
+      }
+
+      btnSave.addEventListener("click", async () => {
+        try {
+          if (!lastBufferGeometry) {
+            setStatus("Generate a buffer first.", true);
+            return;
+          }
+
+          btnSave.disabled = true;
+          setStatus("Signing in (if needed) and saving…");
+
+          await ensureSignedIn();
+
+          const soraLayer = new FeatureLayer({ url: SORA_LAYER_URL });
+
+          const opId = (panel.querySelector("#opId").value || "").trim();
+          const notes = (panel.querySelector("#notes").value || "").trim();
+          const meters = Number(panel.querySelector("#bufM").value);
+
+          const feature = new Graphic({
+            geometry: lastBufferGeometry,
+            attributes: {
+              operation_id: opId,
+              buffer_m: meters,
+              notes: notes
+            }
+          });
+
+          const res = await soraLayer.applyEdits({ addFeatures: [feature] });
+
+          const addResult = res?.addFeatureResults?.[0];
+          if (addResult?.error) {
+            console.error(addResult.error);
+            setStatus("Save failed: " + (addResult.error.message || "unknown error"), true);
+            btnSave.disabled = false;
+            return;
+          }
+
+          setStatus("Saved! Buffer added to the hosted layer. Export from the layer item page.");
+        } catch (err) {
+          console.error(err);
+          const msg =
+            (err?.details && err.details[0]?.message) ||
+            err?.message ||
+            JSON.stringify(err);
+          setStatus("Save failed: " + msg, true);
+          btnSave.disabled = false;
+        }
+      });
+
+      view.when(() => setStatus("Ready. Click “Draw AOI polygon”."));
+    });
+  </script>
+</body>
+</html>
